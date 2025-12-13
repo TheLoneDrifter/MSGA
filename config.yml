@@ -1,15 +1,16 @@
-# VerifyPlugin Configuration for Supabase
-# Supabase Configuration (REQUIRED)
 supabase:
   url: "https://xllulqlustiipqfinniw.supabase.co"
-  key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhsbHVscWx1c3RpaXBxZmlubml3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU2NDU3NjUsImV4cCI6MjA4MTIyMTc2NX0.91sL71ss22R7Ef7O2QGuJ81xAxaMq9bgVx9wkdu3wQw"        # Your Supabase anon/public key
+  anon_key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhsbHVscWx1c3RpaXBxZmlubml3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU2NDU3NjUsImV4cCI6MjA4MTIyMTc2NX0.91sL71ss22R7Ef7O2QGuJ81xAxaMq9bgVx9wkdu3wQw"
+  service_role_key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhsbHVscWx1c3RpaXBxZmlubml3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NTY0NTc2NSwiZXhwIjoyMDgxMjIxNzY1fQ.TWosxCyxjEDH4koV4SrKXFa1CkdqI-WrH1nn5AQxfxw"
 messages:
-  success: "&a✅ Verification code submitted! The Discord bot will now verify your account."
-  error: "&c❌ Invalid or expired code!"
+  success: "&a[SUCCESS] Verification code submitted! The Discord bot will now verify your account."
+  error: "&c[ERROR] Invalid or expired code!"
   usage: "&eUsage: /verify <6-digit-code>"
-  code-too-short: "&c❌ Code too short! Must be 6 digits."
-  code-too-long: "&c❌ Code too long! Must be 6 digits."
-  code-invalid-chars: "&c❌ Code must contain only numbers!"
-  no-code: "&c❌ Please provide a 6-digit verification code."
+  code-too-short: "&c[ERROR] Code too short! Must be 6 digits."
+  code-too-long: "&c[ERROR] Code too long! Must be 6 digits."
+  code-invalid-chars: "&c[ERROR] Code must contain only numbers!"
+  no-code: "&c[ERROR] Please provide a 6-digit verification code."
 broadcast-verifications: false
 check-interval-seconds: 5
+server-name: "MSGA Verification Server"
+show-welcome-message: true
