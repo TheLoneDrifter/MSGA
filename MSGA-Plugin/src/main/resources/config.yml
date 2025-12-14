@@ -1,0 +1,30 @@
+# MSGA Verify Plugin Configuration
+# Discord bot that creates verification codes
+discord-bot-name: "MSGA"
+
+# In-game messages (use & for color codes)
+messages:
+  success: "&a&l✅ Verification code sent! Check Discord for confirmation."
+  error: "&c&l❌ Invalid code! Code must be 6 digits."
+  usage: "&e&lUsage: /verify <6-digit-code>"
+  code-too-short: "&c&l❌ Code too short! Must be 6 digits."
+  code-too-long: "&c&l❌ Code too long! Must be 6 digits."
+  code-invalid-chars: "&c&l❌ Code must contain only numbers!"
+
+# Kick messages (shown when player is kicked)
+kick-messages:
+  success: "&a&lSuccessful - Verified"
+  error: "&c&lUnsuccessful - Invalid verification code"
+  code-too-short: "&c&lUnsuccessful - Code too short"
+  code-too-long: "&c&lUnsuccessful - Code too long"
+  code-invalid-chars: "&c&lUnsuccessful - Code contains invalid characters"
+  save-error: "&c&lUnsuccessful - System error, please contact admin"
+
+# Plugin settings
+broadcast-verifications: false
+require-online: false
+
+# Path to shared verification codes file (used by Discord bot)
+# Leave empty for auto-detection, or specify full path like:
+# shared-codes-path: "C:/server/verification_codes.json"
+shared-codes-path: "/root/verification_codes.json"

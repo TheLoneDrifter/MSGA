@@ -1,0 +1,14 @@
+name: VerifyPlugin
+main: com.msga.verify.VerifyPlugin
+version: 1.0.0
+description: Hypixel Skyblock Guild Verification for MSGA Discord Bot
+author: MSGA, Voltarian Technologies
+website: https://discord.gg/xzYxpnXSb2
+api-version: "1.8"
+
+# Commands
+commands:
+  verify:
+    description: Verify your Discord account with a 6-digit code
+    usage: "/verify <code>"
+    aliases: [v, auth]
