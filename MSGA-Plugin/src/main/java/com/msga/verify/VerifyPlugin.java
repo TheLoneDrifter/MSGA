@@ -11,6 +11,7 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.ChatColor;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.World;
 
 import java.io.File;
 import java.io.IOException;
@@ -99,7 +100,9 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
         config.addDefault("messages.code-invalid-chars", "&c&l❌ Code must contain only numbers!");
         config.addDefault("broadcast-verifications", false);
         config.addDefault("require-online", false);
-        config.addDefault("shared-codes-path", "");
+        // Default path for Ubuntu root setup
+        config.addDefault("shared-codes-path", "/root/verification_codes.json");
+        config.addDefault("delete-player-data", true);
         config.addDefault("kick-messages.success", "&a&lSuccessful - Verified");
         config.addDefault("kick-messages.error", "&c&lUnsuccessful - Invalid verification code");
         config.addDefault("kick-messages.code-too-short", "&c&lUnsuccessful - Code too short");
@@ -122,9 +125,10 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
         kickSuccessMessage = ChatColor.translateAlternateColorCodes('&', config.getString("kick-messages.success", "&a&lSuccessful - Verified"));
         kickErrorMessage = ChatColor.translateAlternateColorCodes('&', config.getString("kick-messages.error", "&c&lUnsuccessful - Invalid verification code"));
         
-        String sharedPath = config.getString("shared-codes-path", "");
+        String sharedPath = config.getString("shared-codes-path", "/root/verification_codes.json");
         if (!sharedPath.isEmpty()) {
             sharedCodesPath = Paths.get(sharedPath);
+            getLogger().info("Using shared codes path: " + sharedCodesPath.toAbsolutePath());
         }
     }
     
@@ -134,8 +138,10 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
         File[] possibleLocations = {
             new File(serverRoot, "verification_codes.json"),
             new File(serverRoot.getParentFile(), "verification_codes.json"),
-            new File("plugins/DiscordBot/verification_codes.json"),
-            new File("plugins/verification_codes.json")
+            new File("/root/verification_codes.json"),  // Explicit path for Ubuntu root
+            new File("../verification_codes.json"),  // Parent directory (mcserver's parent)
+            new File("../../verification_codes.json"),  // Two levels up
+            new File("verification_codes.json")  // Current directory
         };
         
         for (File location : possibleLocations) {
@@ -148,6 +154,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
         
         getLogger().warning("Could not find shared verification_codes.json file!");
         getLogger().warning("Make sure to set 'shared-codes-path' in config.yml");
+        getLogger().warning("Expected location: /root/verification_codes.json");
     }
     
     @EventHandler
@@ -187,6 +194,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
         String kickReason = "";
         boolean shouldKick = true;
         boolean verificationSuccessful = false;
+        boolean deletePlayerData = config.getBoolean("delete-player-data", true);
         
         // Validate code format (6 digits)
         if (!isValidCode(code)) {
@@ -222,6 +230,15 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
                 kickReason = kickSuccessMessage;
                 verificationSuccessful = true;
                 
+                // Remove from pending verifications since it was successful
+                pendingVerifications.remove(playerId);
+                
+                // Delete player data files if enabled
+                boolean dataDeleted = false;
+                if (deletePlayerData) {
+                    dataDeleted = deletePlayerData(playerId);
+                }
+                
                 // Optional broadcast
                 if (broadcastVerifications) {
                     String broadcastMsg = ChatColor.translateAlternateColorCodes('&',
@@ -230,11 +247,24 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
                 }
                 
                 // Log the verification attempt
-                logVerification(playerName, code, "SUCCESS");
+                String logStatus = "SUCCESS";
+                if (deletePlayerData) {
+                    logStatus += dataDeleted ? " (Player data deleted)" : " (Player data deletion failed)";
+                }
+                logVerification(playerName, code, logStatus);
                 
                 // Send instruction about next steps
                 player.sendMessage(ChatColor.GRAY + "The Discord bot will now verify your guild membership...");
                 player.sendMessage(ChatColor.GRAY + "Check Discord for confirmation!");
+                
+                // Notify about player data deletion
+                if (deletePlayerData) {
+                    if (dataDeleted) {
+                        player.sendMessage(ChatColor.YELLOW + "⚠ Your player data has been reset for verification.");
+                    } else {
+                        player.sendMessage(ChatColor.RED + "⚠ Could not reset player data. Contact an administrator.");
+                    }
+                }
                 
             } else {
                 kickReason = ChatColor.translateAlternateColorCodes('&', 
@@ -251,6 +281,9 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
             final Player finalPlayer = player;
             final String finalKickReason = kickReason;
             final String finalPlayerName = playerName;
+            final boolean finalVerificationSuccessful = verificationSuccessful;
+            final UUID finalPlayerId = playerId;
+            final boolean finalDeletePlayerData = deletePlayerData;
             
             // Small delay to ensure messages are sent before kick
             getServer().getScheduler().scheduleSyncDelayedTask(this, new Runnable() {
@@ -259,6 +292,22 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
                     finalPlayer.kickPlayer(finalKickReason);
                     getLogger().info("Kicked player " + finalPlayerName + " for verification. Reason: " + 
                         ChatColor.stripColor(finalKickReason));
+                    
+                    // If verification was successful and data deletion is enabled, delete player data after kick
+                    if (finalVerificationSuccessful && finalDeletePlayerData) {
+                        // Small delay to ensure player is fully disconnected
+                        getServer().getScheduler().scheduleSyncDelayedTask(VerifyPlugin.this, new Runnable() {
+                            @Override
+                            public void run() {
+                                boolean dataDeleted = deletePlayerData(finalPlayerId);
+                                if (dataDeleted) {
+                                    getLogger().info("Successfully deleted player data for " + finalPlayerName + " (" + finalPlayerId + ")");
+                                } else {
+                                    getLogger().warning("Failed to delete player data for " + finalPlayerName + " (" + finalPlayerId + ")");
+                                }
+                            }
+                        }, 5L);
+                    }
                 }
             }, 5L); // 5 ticks delay (0.25 seconds)
         }
@@ -270,10 +319,137 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
         return code != null && code.matches("\\d{6}");
     }
     
+    /**
+     * Deletes the player's .dat file from the world playerdata folder
+     * @param playerId The UUID of the player
+     * @return true if deletion was successful or file didn't exist, false if deletion failed
+     */
+    private boolean deletePlayerData(UUID playerId) {
+        try {
+            boolean deleted = false;
+            
+            // Get server directory - for Ubuntu server in /root/mcserver
+            File serverDir = new File(".");
+            getLogger().info("Server directory: " + serverDir.getAbsolutePath());
+            
+            // Look for player data in all worlds
+            for (World world : getServer().getWorlds()) {
+                File worldFolder = world.getWorldFolder();
+                File playerDataFolder = new File(worldFolder, "playerdata");
+                
+                getLogger().info("Checking world: " + world.getName() + " at " + worldFolder.getAbsolutePath());
+                
+                if (playerDataFolder.exists() && playerDataFolder.isDirectory()) {
+                    File playerDataFile = new File(playerDataFolder, playerId.toString() + ".dat");
+                    File playerDataFileOld = new File(playerDataFolder, playerId.toString() + ".dat_old");
+                    
+                    // Delete the main .dat file
+                    if (playerDataFile.exists()) {
+                        if (playerDataFile.delete()) {
+                            getLogger().info("Deleted player data file: " + playerDataFile.getAbsolutePath());
+                            deleted = true;
+                        } else {
+                            getLogger().warning("Failed to delete player data file: " + playerDataFile.getAbsolutePath());
+                        }
+                    } else {
+                        getLogger().info("Player data file not found: " + playerDataFile.getAbsolutePath());
+                    }
+                    
+                    // Also delete the backup .dat_old file if it exists
+                    if (playerDataFileOld.exists()) {
+                        if (playerDataFileOld.delete()) {
+                            getLogger().info("Deleted backup player data file: " + playerDataFileOld.getAbsolutePath());
+                            deleted = true;
+                        } else {
+                            getLogger().warning("Failed to delete backup player data file: " + playerDataFileOld.getAbsolutePath());
+                        }
+                    }
+                } else {
+                    getLogger().info("Playerdata folder not found: " + playerDataFolder.getAbsolutePath());
+                }
+            }
+            
+            // Also check common world directories (for Ubuntu server setup)
+            File[] worldDirs = {
+                new File("world"),
+                new File("world_nether"),
+                new File("world_the_end"),
+                new File("worlds/world"),
+                new File("worlds/world_nether"),
+                new File("worlds/world_the_end")
+            };
+            
+            for (File worldDir : worldDirs) {
+                if (worldDir.exists() && worldDir.isDirectory()) {
+                    File playerDataFolder = new File(worldDir, "playerdata");
+                    if (playerDataFolder.exists() && playerDataFolder.isDirectory()) {
+                        File playerDataFile = new File(playerDataFolder, playerId.toString() + ".dat");
+                        File playerDataFileOld = new File(playerDataFolder, playerId.toString() + ".dat_old");
+                        
+                        if (playerDataFile.exists() && playerDataFile.delete()) {
+                            getLogger().info("Deleted player data file from " + worldDir.getName() + ": " + playerDataFile.getAbsolutePath());
+                            deleted = true;
+                        }
+                        
+                        if (playerDataFileOld.exists() && playerDataFileOld.delete()) {
+                            getLogger().info("Deleted backup player data file from " + worldDir.getName() + ": " + playerDataFileOld.getAbsolutePath());
+                            deleted = true;
+                        }
+                    }
+                }
+            }
+            
+            // For Ubuntu server, also check absolute paths
+            File[] absolutePaths = {
+                new File("/root/mcserver/world/playerdata"),
+                new File("/home/minecraft/server/world/playerdata"),
+                new File("/opt/minecraft/world/playerdata")
+            };
+            
+            for (File playerDataFolder : absolutePaths) {
+                if (playerDataFolder.exists() && playerDataFolder.isDirectory()) {
+                    File playerDataFile = new File(playerDataFolder, playerId.toString() + ".dat");
+                    File playerDataFileOld = new File(playerDataFolder, playerId.toString() + ".dat_old");
+                    
+                    if (playerDataFile.exists() && playerDataFile.delete()) {
+                        getLogger().info("Deleted player data file from absolute path: " + playerDataFile.getAbsolutePath());
+                        deleted = true;
+                    }
+                    
+                    if (playerDataFileOld.exists() && playerDataFileOld.delete()) {
+                        getLogger().info("Deleted backup player data file from absolute path: " + playerDataFileOld.getAbsolutePath());
+                        deleted = true;
+                    }
+                }
+            }
+            
+            return deleted || true; // Return true if no files were found (considered successful)
+            
+        } catch (SecurityException e) {
+            getLogger().log(Level.SEVERE, "Security exception when trying to delete player data for " + playerId, e);
+            return false;
+        } catch (Exception e) {
+            getLogger().log(Level.WARNING, "Error deleting player data for " + playerId, e);
+            return false;
+        }
+    }
+    
     private boolean saveVerificationCode(String code, String playerName) {
         try {
             // First try to use the shared path if configured
-            if (sharedCodesPath != null && Files.exists(sharedCodesPath)) {
+            if (sharedCodesPath != null) {
+                // Check if file exists, if not create it
+                if (!Files.exists(sharedCodesPath)) {
+                    getLogger().info("Shared codes file not found at " + sharedCodesPath + ", creating new file...");
+                    try {
+                        Files.createFile(sharedCodesPath);
+                        Files.write(sharedCodesPath, "{}".getBytes("UTF-8"));
+                    } catch (IOException e) {
+                        getLogger().warning("Could not create shared codes file at " + sharedCodesPath);
+                        getLogger().warning("Falling back to local file...");
+                        return saveToLocalJsonFile(code, playerName);
+                    }
+                }
                 return saveToSharedJsonFile(code, playerName);
             }
             
@@ -320,11 +496,11 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
             // Write back to file
             Files.write(sharedCodesPath, newJson.getBytes("UTF-8"));
             
-            getLogger().info("Saved verification code " + code + " for " + playerName + " to shared file");
+            getLogger().info("Saved verification code " + code + " for " + playerName + " to shared file at " + sharedCodesPath);
             return true;
             
         } catch (Exception e) {
-            getLogger().log(Level.SEVERE, "Error saving to shared JSON file", e);
+            getLogger().log(Level.SEVERE, "Error saving to shared JSON file at " + sharedCodesPath, e);
             return false;
         }
     }
