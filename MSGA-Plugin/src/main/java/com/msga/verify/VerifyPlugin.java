@@ -247,13 +247,18 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
         
         // Kick the player with appropriate message
         if (shouldKick) {
+            // Create final variables for use in the inner class
+            final Player finalPlayer = player;
+            final String finalKickReason = kickReason;
+            final String finalPlayerName = playerName;
+            
             // Small delay to ensure messages are sent before kick
             getServer().getScheduler().scheduleSyncDelayedTask(this, new Runnable() {
                 @Override
                 public void run() {
-                    player.kickPlayer(kickReason);
-                    getLogger().info("Kicked player " + playerName + " for verification. Reason: " + 
-                        ChatColor.stripColor(kickReason));
+                    finalPlayer.kickPlayer(finalKickReason);
+                    getLogger().info("Kicked player " + finalPlayerName + " for verification. Reason: " + 
+                        ChatColor.stripColor(finalKickReason));
                 }
             }, 5L); // 5 ticks delay (0.25 seconds)
         }

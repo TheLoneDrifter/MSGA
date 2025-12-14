@@ -48,13 +48,6 @@
             <version>${spigot.version}</version>
             <scope>provided</scope>
         </dependency>
-        <!-- CraftBukkit (optional, for NMS if needed later) -->
-        <dependency>
-            <groupId>org.bukkit</groupId>
-            <artifactId>craftbukkit</artifactId>
-            <version>${spigot.version}</version>
-            <scope>provided</scope>
-        </dependency>
     </dependencies>
     
     <build>
