@@ -5,6 +5,8 @@ import aiohttp
 import asyncio
 import json
 import os
+import random
+import string
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -25,10 +27,11 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Store active verifications
-active_verifications = {}
-
 # ==================== HELPER FUNCTIONS ====================
+def generate_code() -> str:
+    """Generate a random 6-digit verification code"""
+    return ''.join(random.choices(string.digits, k=6))
+
 def load_verification_codes():
     """Load verification codes from JSON file"""
     try:
@@ -45,6 +48,17 @@ def load_verification_codes():
     except Exception as e:
         print(f"❌ Error loading verification codes: {e}")
         return {}
+
+def save_verification_codes(data):
+    """Save verification codes to JSON file"""
+    try:
+        with open(VERIFICATION_FILE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        print(f"✅ Saved {len(data)} verification codes to {VERIFICATION_FILE_PATH}")
+        return True
+    except Exception as e:
+        print(f"❌ Error saving verification codes: {e}")
+        return False
 
 async def get_minecraft_uuid(username: str) -> dict:
     """Get Minecraft UUID from username using Mojang API"""
@@ -97,144 +111,15 @@ async def check_guild_membership(uuid: str) -> dict:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-def update_verification_status(code: str, verified: bool = False, discord_user_id: str = None):
-    """Update the verification status in the JSON file"""
-    try:
-        # Load current data
-        with open(VERIFICATION_FILE_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        # Update the specific code entry
-        if code in data:
-            data[code]["verified"] = verified
-            if discord_user_id:
-                data[code]["discord_user_id"] = discord_user_id
-            
-            # Save back to file
-            with open(VERIFICATION_FILE_PATH, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
-            
-            status = "verified: true" if verified else "verified: false"
-            print(f"✅ Updated code {code} status: {status}")
-            return True
-        else:
-            print(f"❌ Code {code} not found in verification file")
-            return False
-            
-    except Exception as e:
-        print(f"❌ Error updating verification status: {e}")
-        return False
-
-async def process_verification(code: str, discord_user_id: str, interaction: discord.Interaction = None):
-    """Process a verification code - check guild and assign role if in guild"""
-    try:
-        # Load the verification codes
-        data = load_verification_codes()
-        
-        if code not in data:
-            if interaction:
-                await interaction.followup.send(f"❌ Verification code `{code}` not found. Make sure you entered it correctly in Minecraft.", ephemeral=True)
-            return False
-        
-        entry = data[code]
-        minecraft_username = entry.get("minecraft_username")
-        
-        # Get Minecraft UUID
-        uuid_result = await get_minecraft_uuid(minecraft_username)
-        if not uuid_result["success"]:
-            if interaction:
-                await interaction.followup.send(f"❌ Error: {uuid_result['error']}", ephemeral=True)
-            return False
-        
-        uuid = uuid_result["uuid"]
-        correct_name = uuid_result["name"]
-        
-        # Check guild membership
-        guild_result = await check_guild_membership(uuid)
-        
-        # Update verification status to false (processed)
-        update_verification_status(code, False, discord_user_id)
-        
-        if not guild_result["success"]:
-            # Not in the guild
-            if interaction:
-                embed = discord.Embed(
-                    title="❌ Verification Failed",
-                    description=f"Your Minecraft account **{correct_name}** could not be verified.",
-                    color=discord.Color.red()
-                )
-                embed.add_field(
-                    name="Reason",
-                    value=guild_result['error'],
-                    inline=False
-                )
-                embed.add_field(
-                    name="What to do",
-                    value="1. Make sure you're in the correct Hypixel guild\n2. Make sure your Minecraft username is correct\n3. Try the verification process again",
-                    inline=False
-                )
-                await interaction.followup.send(embed=embed, ephemeral=True)
-            
-            print(f"❌ Guild verification failed for {correct_name}: {guild_result['error']}")
-            return False
-        
-        # Player is in the guild - assign verified role
-        guild = bot.get_guild(int(GUILD_ID)) if GUILD_ID else None
-        if guild:
-            member = guild.get_member(int(discord_user_id))
-            if member:
-                role = guild.get_role(VERIFIED_ROLE_ID)
-                if role:
-                    try:
-                        if role not in member.roles:
-                            await member.add_roles(role)
-                        
-                        # Send success message
-                        if interaction:
-                            embed = discord.Embed(
-                                title="✅ Verification Complete!",
-                                description=f"Your Minecraft account **{correct_name}** has been verified!",
-                                color=discord.Color.green()
-                            )
-                            embed.add_field(
-                                name="Guild Membership",
-                                value=f"You are a member of **{guild_result['guild_name']}**",
-                                inline=False
-                            )
-                            embed.add_field(
-                                name="Role Granted",
-                                value=f"You have been granted the {role.mention} role",
-                                inline=False
-                            )
-                            embed.set_footer(text=f"Verification code: {code}")
-                            await interaction.followup.send(embed=embed, ephemeral=True)
-                        
-                        print(f"✅ Successfully verified {correct_name} (Discord: {member.name}) in guild {guild_result['guild_name']}")
-                        return True
-                        
-                    except discord.Forbidden:
-                        error_msg = "Bot missing permissions to add role"
-                        if interaction:
-                            await interaction.followup.send(f"❌ {error_msg}", ephemeral=True)
-                        print(f"❌ {error_msg}")
-                        return False
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error processing verification: {e}")
-        if interaction:
-            await interaction.followup.send(f"❌ An error occurred: {str(e)}", ephemeral=True)
-        return False
-
-async def check_pending_verifications():
-    """Check for pending verifications (verified: true) and process them"""
+async def process_verified_codes():
+    """Process codes that have been set to verified: true by Minecraft plugin"""
     try:
         data = load_verification_codes()
+        processed_any = False
         
         for code, entry in data.items():
-            # Check if verified is true (submitted by Minecraft plugin)
-            if entry.get("verified", False):
+            # Check if code is verified by Minecraft plugin but not processed yet
+            if entry.get("verified", False) and not entry.get("processed", False):
                 minecraft_username = entry.get("minecraft_username")
                 discord_user_id = entry.get("discord_user_id")
                 
@@ -242,13 +127,110 @@ async def check_pending_verifications():
                     print(f"⚠️ Code {code} has no discord_user_id, skipping")
                     continue
                 
-                print(f"🔄 Processing pending verification for code {code} (Minecraft: {minecraft_username})")
+                print(f"🔄 Processing verified code {code} for {minecraft_username}")
                 
-                # Process verification without interaction
-                await process_verification(code, discord_user_id)
+                # Get Minecraft UUID
+                uuid_result = await get_minecraft_uuid(minecraft_username)
+                if not uuid_result["success"]:
+                    print(f"❌ Failed to get UUID for {minecraft_username}: {uuid_result['error']}")
+                    # Mark as processed anyway to avoid retrying
+                    data[code]["processed"] = True
+                    data[code]["error"] = uuid_result["error"]
+                    save_verification_codes(data)
+                    continue
                 
+                uuid = uuid_result["uuid"]
+                correct_name = uuid_result["name"]
+                
+                # Check guild membership
+                guild_result = await check_guild_membership(uuid)
+                
+                # Mark as processed
+                data[code]["processed"] = True
+                
+                if not guild_result["success"]:
+                    # Not in the guild
+                    print(f"❌ Guild check failed for {correct_name}: {guild_result['error']}")
+                    data[code]["guild_verified"] = False
+                    data[code]["error"] = guild_result["error"]
+                    
+                    # Try to send DM to user
+                    try:
+                        guild = bot.get_guild(int(GUILD_ID)) if GUILD_ID else None
+                        if guild:
+                            member = guild.get_member(int(discord_user_id))
+                            if member:
+                                embed = discord.Embed(
+                                    title="❌ Verification Failed",
+                                    description=f"Your Minecraft account **{correct_name}** could not be verified.",
+                                    color=discord.Color.red()
+                                )
+                                embed.add_field(
+                                    name="Reason",
+                                    value=guild_result['error'],
+                                    inline=False
+                                )
+                                embed.add_field(
+                                    name="What to do",
+                                    value="1. Make sure you're in the correct Hypixel guild\n2. Try the verification process again",
+                                    inline=False
+                                )
+                                await member.send(embed=embed)
+                    except:
+                        pass
+                    
+                else:
+                    # Player is in the guild - assign verified role
+                    data[code]["guild_verified"] = True
+                    data[code]["verified_at"] = datetime.now(timezone.utc).isoformat()
+                    
+                    guild = bot.get_guild(int(GUILD_ID)) if GUILD_ID else None
+                    if guild:
+                        member = guild.get_member(int(discord_user_id))
+                        if member:
+                            role = guild.get_role(VERIFIED_ROLE_ID)
+                            if role:
+                                try:
+                                    if role not in member.roles:
+                                        await member.add_roles(role)
+                                    
+                                    print(f"✅ Successfully verified {correct_name} (Discord: {member.name}) in guild {guild_result['guild_name']}")
+                                    
+                                    # Send success DM
+                                    try:
+                                        embed = discord.Embed(
+                                            title="✅ Verification Complete!",
+                                            description=f"Your Minecraft account **{correct_name}** has been verified!",
+                                            color=discord.Color.green()
+                                        )
+                                        embed.add_field(
+                                            name="Guild Membership",
+                                            value=f"You are a member of **{guild_result['guild_name']}**",
+                                            inline=False
+                                        )
+                                        embed.add_field(
+                                            name="Role Granted",
+                                            value=f"You have been granted the {role.mention} role",
+                                            inline=False
+                                        )
+                                        embed.set_footer(text=f"Verification code: {code}")
+                                        await member.send(embed=embed)
+                                    except:
+                                        pass
+                                    
+                                except discord.Forbidden:
+                                    error_msg = "Bot missing permissions to add role"
+                                    print(f"❌ {error_msg}")
+                                    data[code]["error"] = error_msg
+                
+                save_verification_codes(data)
+                processed_any = True
+        
+        return processed_any
+        
     except Exception as e:
-        print(f"❌ Error checking pending verifications: {e}")
+        print(f"❌ Error processing verified codes: {e}")
+        return False
 
 # ==================== BOT EVENTS ====================
 @bot.event
@@ -261,13 +243,15 @@ async def on_ready():
     # Load existing verification codes
     data = load_verification_codes()
     
-    # Count verified vs unverified
-    verified_count = sum(1 for entry in data.values() if entry.get("verified", False))
-    unverified_count = len(data) - verified_count
-    print(f"📊 Loaded {len(data)} verification entries ({verified_count} pending, {unverified_count} processed)")
+    # Count statuses
+    pending = sum(1 for e in data.values() if not e.get("verified", False))
+    verified = sum(1 for e in data.values() if e.get("verified", False))
+    processed = sum(1 for e in data.values() if e.get("processed", False))
+    
+    print(f"📊 Loaded {len(data)} codes: {pending} pending, {verified} verified, {processed} processed")
     
     # Start background task
-    bot.loop.create_task(check_pending_periodically())
+    bot.loop.create_task(check_verified_periodically())
     
     # Sync slash commands
     try:
@@ -276,97 +260,110 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Error syncing commands: {e}")
 
-async def check_pending_periodically():
-    """Periodically check for pending verifications (verified: true)"""
+async def check_verified_periodically():
+    """Periodically check for codes set to verified: true by Minecraft"""
     await bot.wait_until_ready()
     while not bot.is_closed():
         try:
-            await check_pending_verifications()
+            await process_verified_codes()
         except Exception as e:
-            print(f"❌ Error in pending verification check: {e}")
-        await asyncio.sleep(10)  # Check every 10 seconds
+            print(f"❌ Error in verification check: {e}")
+        await asyncio.sleep(5)  # Check every 5 seconds
 
 # ==================== SLASH COMMANDS ====================
 @bot.tree.command(name="verify", description="Start verification process with your Minecraft username")
 @app_commands.describe(minecraft_username="Your Minecraft username")
 async def verify_command(interaction: discord.Interaction, minecraft_username: str):
-    """Start verification process by providing Minecraft username"""
+    """Start verification process - generates code and saves with verified: false"""
     
     await interaction.response.defer(ephemeral=True)
     
     # Clean username
     minecraft_username = minecraft_username.strip()
     
-    # Store user's Minecraft username with a placeholder code
-    # The actual code will be generated by the Minecraft plugin
+    # Load existing data
+    data = load_verification_codes()
+    
+    # Check if user already has an active verification (not processed)
     user_id = str(interaction.user.id)
-    active_verifications[user_id] = {
+    for code, entry in data.items():
+        if entry.get("discord_user_id") == user_id and not entry.get("processed", False):
+            if entry.get("verified", False):
+                status = "Submitted in Minecraft - waiting for processing"
+            else:
+                status = "Pending - not submitted in Minecraft yet"
+            
+            embed = discord.Embed(
+                title="⚠️ Active Verification Found",
+                description=f"You already have an active verification!",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="Minecraft Account", value=entry.get("minecraft_username"), inline=False)
+            embed.add_field(name="Verification Code", value=f"`{code}`", inline=False)
+            embed.add_field(name="Status", value=status, inline=False)
+            embed.add_field(
+                name="Instructions",
+                value=f"Join the Minecraft server and type:\n```/verify {code}```",
+                inline=False
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+    
+    # Generate new code
+    code = generate_code()
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    
+    # Save to JSON with verified: false
+    data[code] = {
         "minecraft_username": minecraft_username,
-        "started_at": datetime.now(timezone.utc).isoformat()
+        "timestamp": timestamp,
+        "verified": False,  # Minecraft plugin will set this to true
+        "discord_user_id": user_id,
+        "processed": False,  # Bot will set this to true after processing
+        "created_at": datetime.now(timezone.utc).isoformat()
     }
     
+    save_verification_codes(data)
+    
+    # Send instructions to user
     embed = discord.Embed(
-        title="🔐 Verification Instructions",
+        title="🔐 Verification Started",
         description=f"To verify your Minecraft account **{minecraft_username}**, please follow these steps:",
         color=discord.Color.blue()
     )
     embed.add_field(
-        name="📝 **Step 1: Join Minecraft Server**",
+        name="📝 **Your Verification Code:**",
+        value=f"```{code}```",
+        inline=False
+    )
+    embed.add_field(
+        name="📍 **Step 1: Join Minecraft Server**",
         value="Join our Minecraft server",
         inline=False
     )
     embed.add_field(
-        name="📝 **Step 2: Get Your Code**",
-        value="Once in the server, you will receive a 6-digit verification code automatically",
+        name="📍 **Step 2: Submit Code**",
+        value=f"Once in the server, type:\n```/verify {code}```",
         inline=False
     )
     embed.add_field(
-        name="📝 **Step 3: Submit Code**",
-        value="Type `/verify <code>` in Minecraft chat (replace `<code>` with your actual code)",
+        name="📍 **Step 3: Wait for Verification**",
+        value="The bot will automatically check if you're in the guild and assign the verified role",
         inline=False
     )
     embed.add_field(
-        name="📝 **Step 4: Complete Verification**",
-        value="After submitting the code in Minecraft, come back here and use `/submit_code <code>` to finish the process",
+        name="ℹ️ **Note:**",
+        value="After submitting the code, you will be kicked from the server. This is normal!",
         inline=False
     )
     embed.add_field(
-        name="ℹ️ **Note**",
-        value="After submitting the code in Minecraft, you will be kicked from the server. This is normal!",
+        name="⏱️ **Code expires in 30 minutes**",
+        value="If you don't submit the code within 30 minutes, you'll need to start over",
         inline=False
     )
-    embed.set_footer(text="You can use /status to check your verification progress")
     
     await interaction.followup.send(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="submit_code", description="Submit your verification code after entering it in Minecraft")
-@app_commands.describe(code="The 6-digit verification code you received in Minecraft")
-async def submit_code_command(interaction: discord.Interaction, code: str):
-    """Submit verification code after entering it in Minecraft"""
-    
-    await interaction.response.defer(ephemeral=True)
-    
-    user_id = str(interaction.user.id)
-    
-    # Check if user started verification
-    if user_id not in active_verifications:
-        embed = discord.Embed(
-            title="❌ No Active Verification",
-            description="You haven't started a verification yet. Use `/verify <minecraft_username>` first.",
-            color=discord.Color.red()
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-        return
-    
-    # Clean code
-    code = code.strip()
-    
-    # Process the verification
-    success = await process_verification(code, user_id, interaction)
-    
-    if success:
-        # Remove from active verifications
-        active_verifications.pop(user_id, None)
+    print(f"📝 Generated code {code} for {minecraft_username} (Discord: {interaction.user.name})")
 
 @bot.tree.command(name="status", description="Check your verification status")
 async def status_command(interaction: discord.Interaction):
@@ -374,64 +371,93 @@ async def status_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     
     user_id = str(interaction.user.id)
+    data = load_verification_codes()
     
-    # Check if user has an active verification
-    if user_id in active_verifications:
-        user_data = active_verifications[user_id]
-        minecraft_username = user_data["minecraft_username"]
+    # Find user's codes
+    user_codes = []
+    for code, entry in data.items():
+        if entry.get("discord_user_id") == user_id:
+            user_codes.append((code, entry))
+    
+    if not user_codes:
+        # Check if user already has verified role
+        guild = interaction.guild
+        member = guild.get_member(interaction.user.id)
+        
+        if member:
+            role = guild.get_role(VERIFIED_ROLE_ID)
+            if role and role in member.roles:
+                embed = discord.Embed(
+                    title="✅ Already Verified",
+                    description="You have already been verified and have the verified role!",
+                    color=discord.Color.green()
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
         
         embed = discord.Embed(
-            title="⏳ Verification Pending",
-            description=f"Your verification for **{minecraft_username}** is pending.",
-            color=discord.Color.orange()
-        )
-        embed.add_field(
-            name="Status",
-            value="Waiting for you to submit the code in Minecraft",
-            inline=False
-        )
-        embed.add_field(
-            name="Instructions",
-            value="1. Join the Minecraft server\n2. You will receive a code\n3. Type `/verify <code>` in Minecraft\n4. Come back here and use `/submit_code <code>`",
-            inline=False
+            title="❌ No Active Verification",
+            description="You don't have an active verification.\nUse `/verify <minecraft_username>` to start.",
+            color=discord.Color.blue()
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
         return
     
-    # Check if user is already verified (has the role)
-    guild = interaction.guild
-    member = guild.get_member(interaction.user.id)
+    # Show most recent code
+    code, entry = user_codes[-1]  # Most recent
+    minecraft_username = entry.get("minecraft_username")
+    verified = entry.get("verified", False)
+    processed = entry.get("processed", False)
+    guild_verified = entry.get("guild_verified", None)
     
-    if member:
-        role = guild.get_role(VERIFIED_ROLE_ID)
-        if role and role in member.roles:
+    if not verified:
+        # Code not submitted in Minecraft yet
+        embed = discord.Embed(
+            title="⏳ Waiting for Minecraft Submission",
+            description=f"Your verification for **{minecraft_username}** is pending.",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="Verification Code", value=f"`{code}`", inline=False)
+        embed.add_field(
+            name="Instructions",
+            value=f"Join the Minecraft server and type:\n```/verify {code}```",
+            inline=False
+        )
+    elif verified and not processed:
+        # Submitted in Minecraft, waiting for bot to process
+        embed = discord.Embed(
+            title="🔄 Processing Verification",
+            description=f"Code submitted for **{minecraft_username}**!",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Status", value="Checking guild membership...", inline=False)
+        embed.add_field(name="Code", value=f"`{code}`", inline=False)
+    elif processed:
+        if guild_verified:
+            # Successfully verified
             embed = discord.Embed(
-                title="✅ Already Verified",
-                description="You have already been verified and have the verified role!",
+                title="✅ Verification Complete!",
+                description=f"Your Minecraft account **{minecraft_username}** has been verified!",
                 color=discord.Color.green()
             )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
+            if entry.get("guild_name"):
+                embed.add_field(name="Guild", value=entry.get("guild_name"), inline=False)
+        else:
+            # Guild verification failed
+            embed = discord.Embed(
+                title="❌ Guild Verification Failed",
+                description=f"Your Minecraft account **{minecraft_username}** is not in the required guild.",
+                color=discord.Color.red()
+            )
+            if entry.get("error"):
+                embed.add_field(name="Reason", value=entry.get("error"), inline=False)
+            embed.add_field(
+                name="What to do",
+                value="1. Make sure you're in the correct Hypixel guild\n2. Use `/verify <minecraft_username>` to try again",
+                inline=False
+            )
     
-    # User has no active verification and is not verified
-    embed = discord.Embed(
-        title="❌ No Active Verification",
-        description="You don't have an active verification.\nUse `/verify <minecraft_username>` to start.",
-        color=discord.Color.blue()
-    )
     await interaction.followup.send(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="force_verify", description="Manually verify a code (Admin only)")
-@app_commands.describe(code="The 6-digit verification code")
-@app_commands.default_permissions(administrator=True)
-async def force_verify_command(interaction: discord.Interaction, code: str):
-    """Manually verify a code"""
-    await interaction.response.defer(ephemeral=True)
-    
-    success = await process_verification(code, str(interaction.user.id), interaction)
-    
-    if not success:
-        await interaction.followup.send(f"❌ Failed to verify code `{code}`", ephemeral=True)
 
 @bot.tree.command(name="list_codes", description="List all verification codes (Admin only)")
 @app_commands.default_permissions(administrator=True)
@@ -446,55 +472,121 @@ async def list_codes_command(interaction: discord.Interaction):
             await interaction.followup.send("No verification codes found.", ephemeral=True)
             return
         
-        # Create embeds (split into multiple if too many)
+        # Create embeds for different statuses
         pending_codes = []
+        submitted_codes = []
         processed_codes = []
+        failed_codes = []
         
         for code, entry in data.items():
             minecraft_username = entry.get("minecraft_username", "Unknown")
             verified = entry.get("verified", False)
-            timestamp = entry.get("timestamp", 0)
+            processed = entry.get("processed", False)
+            guild_verified = entry.get("guild_verified", None)
             discord_user_id = entry.get("discord_user_id", "None")
             
-            # Convert timestamp to readable time
-            if timestamp:
-                dt = datetime.fromtimestamp(timestamp, timezone.utc)
-                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-            else:
-                time_str = "Unknown"
+            # Try to get Discord username
+            discord_name = "Unknown"
+            try:
+                guild = interaction.guild
+                member = guild.get_member(int(discord_user_id)) if discord_user_id.isdigit() else None
+                if member:
+                    discord_name = member.name
+            except:
+                pass
             
-            entry_info = f"**{code}**: {minecraft_username} ({time_str})\nDiscord ID: {discord_user_id}"
+            entry_info = f"**{code}**: {minecraft_username}\nDiscord: {discord_name} ({discord_user_id})"
             
-            if verified:
+            if not verified:
                 pending_codes.append(entry_info)
-            else:
+            elif verified and not processed:
+                submitted_codes.append(entry_info)
+            elif processed and guild_verified:
                 processed_codes.append(entry_info)
+            elif processed and not guild_verified:
+                failed_codes.append(entry_info)
         
-        # Create embeds
         embeds = []
         
         if pending_codes:
             embed = discord.Embed(
-                title="📝 Pending Verifications (verified: true)",
-                description="\n".join(pending_codes) if pending_codes else "None",
+                title="📝 Pending Codes (not submitted in Minecraft)",
+                description="\n".join(pending_codes[:10]),  # Limit to 10
                 color=discord.Color.orange()
             )
             embed.set_footer(text=f"Total: {len(pending_codes)}")
             embeds.append(embed)
         
+        if submitted_codes:
+            embed = discord.Embed(
+                title="🔄 Submitted Codes (waiting for processing)",
+                description="\n".join(submitted_codes[:10]),
+                color=discord.Color.blue()
+            )
+            embed.set_footer(text=f"Total: {len(submitted_codes)}")
+            embeds.append(embed)
+        
         if processed_codes:
             embed = discord.Embed(
-                title="✅ Processed Codes (verified: false)",
-                description="\n".join(processed_codes[:25]),  # Limit to 25 entries
+                title="✅ Verified Codes",
+                description="\n".join(processed_codes[:10]),
                 color=discord.Color.green()
             )
             embed.set_footer(text=f"Total: {len(processed_codes)}")
+            embeds.append(embed)
+        
+        if failed_codes:
+            embed = discord.Embed(
+                title="❌ Failed Verifications",
+                description="\n".join(failed_codes[:10]),
+                color=discord.Color.red()
+            )
+            embed.set_footer(text=f"Total: {len(failed_codes)}")
             embeds.append(embed)
         
         # Send embeds
         for embed in embeds:
             await interaction.followup.send(embed=embed, ephemeral=True)
             
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="cleanup", description="Clean up old verification codes (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def cleanup_command(interaction: discord.Interaction):
+    """Remove old verification codes"""
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        data = load_verification_codes()
+        old_count = len(data)
+        
+        # Remove codes older than 24 hours
+        current_time = datetime.now(timezone.utc).timestamp()
+        codes_to_remove = []
+        
+        for code, entry in data.items():
+            timestamp = entry.get("timestamp", 0)
+            if current_time - timestamp > 86400:  # 24 hours
+                codes_to_remove.append(code)
+        
+        for code in codes_to_remove:
+            data.pop(code, None)
+        
+        if codes_to_remove:
+            save_verification_codes(data)
+        
+        embed = discord.Embed(
+            title="🧹 Cleanup Complete",
+            description=f"Removed {len(codes_to_remove)} old verification codes.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Before", value=old_count, inline=True)
+        embed.add_field(name="After", value=len(data), inline=True)
+        embed.add_field(name="Removed", value=len(codes_to_remove), inline=True)
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
@@ -508,7 +600,7 @@ if __name__ == "__main__":
     if os.path.exists(VERIFICATION_FILE_PATH):
         print("✅ Verification file found")
     else:
-        print("⚠️ Verification file not found. It will be created by the Minecraft plugin.")
+        print("⚠️ Verification file not found. It will be created when first code is generated.")
     
     print("=" * 50)
     print("🤖 Starting bot...")

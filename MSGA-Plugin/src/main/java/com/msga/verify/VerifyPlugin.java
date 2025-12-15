@@ -15,8 +15,6 @@ import org.bukkit.World;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.FileWriter;
-import java.io.FileReader;
 import java.nio.file.*;
 import java.util.HashMap;
 import java.util.Map;
@@ -30,11 +28,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
     
     private FileConfiguration config;
     private File configFile;
-    private File codesFile;
     private File logFile;
-    
-    // Cache for pending verifications
-    private Map<UUID, String> pendingVerifications = new HashMap<UUID, String>();
     
     // Configuration settings
     private String discordBotName = "MSGA-Verify";
@@ -63,8 +57,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
         // Register events
         getServer().getPluginManager().registerEvents(this, this);
         
-        // Create necessary files
-        codesFile = new File(getDataFolder(), "verification_codes.json");
+        // Create log file
         logFile = new File(getDataFolder(), "verification_log.txt");
         
         // Try to find shared codes file from Discord bot
@@ -92,22 +85,24 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
         
         // Set default values if not present
         config.addDefault("discord-bot-name", "MSGA-Verify");
-        config.addDefault("messages.success", "&a&l✅ Verification code sent! Check Discord for confirmation.");
+        config.addDefault("messages.success", "&a&l✅ Code submitted! The Discord bot will now verify your guild membership.");
         config.addDefault("messages.error", "&c&l❌ Invalid code! Code must be 6 digits.");
         config.addDefault("messages.usage", "&e&lUsage: /verify <6-digit-code>");
         config.addDefault("messages.code-too-short", "&c&l❌ Code too short! Must be 6 digits.");
         config.addDefault("messages.code-too-long", "&c&l❌ Code too long! Must be 6 digits.");
         config.addDefault("messages.code-invalid-chars", "&c&l❌ Code must contain only numbers!");
+        config.addDefault("messages.code-not-found", "&c&l❌ Invalid code! Code not found or already used.");
         config.addDefault("broadcast-verifications", false);
         config.addDefault("require-online", false);
         // Default path for Ubuntu root setup
         config.addDefault("shared-codes-path", "/root/verification_codes.json");
         config.addDefault("delete-player-data", true);
-        config.addDefault("kick-messages.success", "&a&lSuccessful - Verified");
+        config.addDefault("kick-messages.success", "&a&lSuccessful - Code submitted. Check Discord for verification status.");
         config.addDefault("kick-messages.error", "&c&lUnsuccessful - Invalid verification code");
         config.addDefault("kick-messages.code-too-short", "&c&lUnsuccessful - Code too short");
         config.addDefault("kick-messages.code-too-long", "&c&lUnsuccessful - Code too long");
         config.addDefault("kick-messages.code-invalid-chars", "&c&lUnsuccessful - Code contains invalid characters");
+        config.addDefault("kick-messages.code-not-found", "&c&lUnsuccessful - Code not found");
         config.addDefault("kick-messages.save-error", "&c&lUnsuccessful - System error, please contact admin");
         
         config.options().copyDefaults(true);
@@ -122,7 +117,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
         requireOnline = config.getBoolean("require-online", false);
         
         // Load kick messages
-        kickSuccessMessage = ChatColor.translateAlternateColorCodes('&', config.getString("kick-messages.success", "&a&lSuccessful - Verified"));
+        kickSuccessMessage = ChatColor.translateAlternateColorCodes('&', config.getString("kick-messages.success", "&a&lSuccessful - Code submitted. Check Discord for verification status."));
         kickErrorMessage = ChatColor.translateAlternateColorCodes('&', config.getString("kick-messages.error", "&c&lUnsuccessful - Invalid verification code"));
         
         String sharedPath = config.getString("shared-codes-path", "/root/verification_codes.json");
@@ -159,17 +154,9 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
     
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
-        Player player = event.getPlayer();
-        UUID playerId = player.getUniqueId();
-        
-        // Check if player has a pending verification
-        if (pendingVerifications.containsKey(playerId)) {
-            String code = pendingVerifications.get(playerId);
-            player.sendMessage(ChatColor.YELLOW + "⚠ You have a pending verification with code: " + 
-                             ChatColor.GREEN + code);
-            player.sendMessage(ChatColor.YELLOW + "Type " + ChatColor.GREEN + "/verify " + code + 
-                             ChatColor.YELLOW + " to complete verification.");
-        }
+        // Optional: Send reminder about verification
+        // Player player = event.getPlayer();
+        // player.sendMessage(ChatColor.YELLOW + "Use /verify <code> to submit your verification code from Discord");
     }
     
     @Override
@@ -219,19 +206,13 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
             }
             verificationSuccessful = false;
         } else {
-            // Store in pending cache
-            pendingVerifications.put(playerId, code);
+            // Check if code exists in JSON and is not already verified
+            boolean codeFound = updateVerificationCode(code, playerName);
             
-            // Save the code to the shared JSON file with verified: true
-            boolean success = saveVerificationCode(code, playerName);
-            
-            if (success) {
+            if (codeFound) {
                 player.sendMessage(successMessage);
                 kickReason = kickSuccessMessage;
                 verificationSuccessful = true;
-                
-                // Remove from pending verifications since it was successful
-                pendingVerifications.remove(playerId);
                 
                 // Delete player data files if enabled
                 boolean dataDeleted = false;
@@ -247,15 +228,11 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
                 }
                 
                 // Log the verification attempt
-                String logStatus = "SUCCESS (Code saved with verified: true)";
+                String logStatus = "SUCCESS (Code set to verified: true)";
                 if (deletePlayerData) {
                     logStatus += dataDeleted ? " (Player data deleted)" : " (Player data deletion failed)";
                 }
                 logVerification(playerName, code, logStatus);
-                
-                // Send instruction about next steps
-                player.sendMessage(ChatColor.GRAY + "The Discord bot will now verify your guild membership...");
-                player.sendMessage(ChatColor.GRAY + "Check Discord for confirmation!");
                 
                 // Notify about player data deletion
                 if (deletePlayerData) {
@@ -268,9 +245,10 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
                 
             } else {
                 kickReason = ChatColor.translateAlternateColorCodes('&', 
-                    config.getString("kick-messages.save-error", "&c&lUnsuccessful - System error, please contact admin"));
-                player.sendMessage(ChatColor.RED + "❌ Error saving verification code! Please contact an admin.");
-                logVerification(playerName, code, "ERROR - Failed to save");
+                    config.getString("kick-messages.code-not-found", "&c&lUnsuccessful - Code not found"));
+                player.sendMessage(ChatColor.translateAlternateColorCodes('&', 
+                    config.getString("messages.code-not-found")));
+                logVerification(playerName, code, "ERROR - Code not found or already used");
                 verificationSuccessful = false;
             }
         }
@@ -320,253 +298,167 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
     }
     
     /**
+     * Update verification code to set verified: true
+     * @param code The 6-digit code
+     * @param playerName The player's Minecraft username
+     * @return true if code was found and updated, false otherwise
+     */
+    private boolean updateVerificationCode(String code, String playerName) {
+        try {
+            if (sharedCodesPath == null || !Files.exists(sharedCodesPath)) {
+                getLogger().warning("Shared codes file not found at: " + sharedCodesPath);
+                return false;
+            }
+            
+            // Read JSON file
+            byte[] bytes = Files.readAllBytes(sharedCodesPath);
+            String jsonContent = new String(bytes, "UTF-8");
+            
+            // Parse JSON
+            Map<String, Object> data = new HashMap<>();
+            try {
+                // Simple JSON parsing for this specific case
+                jsonContent = jsonContent.trim();
+                if (jsonContent.startsWith("{") && jsonContent.endsWith("}")) {
+                    jsonContent = jsonContent.substring(1, jsonContent.length() - 1);
+                    
+                    // Parse entries
+                    String[] entries = jsonContent.split(",(?=\")");
+                    for (String entry : entries) {
+                        entry = entry.trim();
+                        if (entry.isEmpty()) continue;
+                        
+                        String[] parts = entry.split(":", 2);
+                        if (parts.length == 2) {
+                            String key = parts[0].trim().replace("\"", "");
+                            String value = parts[1].trim();
+                            
+                            // Parse the value as a map
+                            if (value.startsWith("{") && value.endsWith("}")) {
+                                value = value.substring(1, value.length() - 1);
+                                Map<String, Object> entryData = new HashMap<>();
+                                String[] fields = value.split(",");
+                                for (String field : fields) {
+                                    field = field.trim();
+                                    if (field.isEmpty()) continue;
+                                    
+                                    String[] fieldParts = field.split(":", 2);
+                                    if (fieldParts.length == 2) {
+                                        String fieldKey = fieldParts[0].trim().replace("\"", "");
+                                        String fieldValue = fieldParts[1].trim();
+                                        
+                                        // Try to parse as boolean, number, or string
+                                        if (fieldValue.equals("true") || fieldValue.equals("false")) {
+                                            entryData.put(fieldKey, Boolean.parseBoolean(fieldValue));
+                                        } else if (fieldValue.matches("\\d+")) {
+                                            entryData.put(fieldKey, Long.parseLong(fieldValue));
+                                        } else {
+                                            entryData.put(fieldKey, fieldValue.replace("\"", ""));
+                                        }
+                                    }
+                                }
+                                data.put(key, entryData);
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                getLogger().log(Level.WARNING, "Error parsing JSON, trying to create fresh file", e);
+                data = new HashMap<>();
+            }
+            
+            // Check if code exists and is not already verified
+            if (data.containsKey(code)) {
+                Map<String, Object> entryData = (Map<String, Object>) data.get(code);
+                
+                // Check if already verified
+                if (entryData.containsKey("verified") && (Boolean) entryData.get("verified")) {
+                    return false; // Already verified
+                }
+                
+                // Update to verified: true
+                entryData.put("verified", true);
+                data.put(code, entryData);
+                
+                // Save back to file
+                StringBuilder newJson = new StringBuilder("{");
+                boolean first = true;
+                for (Map.Entry<String, Object> entry : data.entrySet()) {
+                    if (!first) newJson.append(",");
+                    first = false;
+                    
+                    newJson.append("\"").append(entry.getKey()).append("\":{");
+                    
+                    Map<String, Object> entryValue = (Map<String, Object>) entry.getValue();
+                    boolean firstField = true;
+                    for (Map.Entry<String, Object> field : entryValue.entrySet()) {
+                        if (!firstField) newJson.append(",");
+                        firstField = false;
+                        
+                        newJson.append("\"").append(field.getKey()).append("\":");
+                        if (field.getValue() instanceof String) {
+                            newJson.append("\"").append(field.getValue()).append("\"");
+                        } else if (field.getValue() instanceof Boolean) {
+                            newJson.append(field.getValue());
+                        } else if (field.getValue() instanceof Number) {
+                            newJson.append(field.getValue());
+                        }
+                    }
+                    newJson.append("}");
+                }
+                newJson.append("}");
+                
+                Files.write(sharedCodesPath, newJson.toString().getBytes("UTF-8"));
+                
+                getLogger().info("Updated code " + code + " to verified: true for " + playerName);
+                return true;
+            }
+            
+            return false;
+            
+        } catch (Exception e) {
+            getLogger().log(Level.SEVERE, "Error updating verification code", e);
+            return false;
+        }
+    }
+    
+    /**
      * Deletes the player's .dat file from the world playerdata folder
-     * @param playerId The UUID of the player
-     * @return true if deletion was successful or file didn't exist, false if deletion failed
      */
     private boolean deletePlayerData(UUID playerId) {
         try {
             boolean deleted = false;
-            
-            // Get server directory - for Ubuntu server in /root/mcserver
-            File serverDir = new File(".");
-            getLogger().info("Server directory: " + serverDir.getAbsolutePath());
             
             // Look for player data in all worlds
             for (World world : getServer().getWorlds()) {
                 File worldFolder = world.getWorldFolder();
                 File playerDataFolder = new File(worldFolder, "playerdata");
                 
-                getLogger().info("Checking world: " + world.getName() + " at " + worldFolder.getAbsolutePath());
-                
                 if (playerDataFolder.exists() && playerDataFolder.isDirectory()) {
                     File playerDataFile = new File(playerDataFolder, playerId.toString() + ".dat");
                     File playerDataFileOld = new File(playerDataFolder, playerId.toString() + ".dat_old");
                     
                     // Delete the main .dat file
-                    if (playerDataFile.exists()) {
-                        if (playerDataFile.delete()) {
-                            getLogger().info("Deleted player data file: " + playerDataFile.getAbsolutePath());
-                            deleted = true;
-                        } else {
-                            getLogger().warning("Failed to delete player data file: " + playerDataFile.getAbsolutePath());
-                        }
-                    } else {
-                        getLogger().info("Player data file not found: " + playerDataFile.getAbsolutePath());
+                    if (playerDataFile.exists() && playerDataFile.delete()) {
+                        getLogger().info("Deleted player data file: " + playerDataFile.getAbsolutePath());
+                        deleted = true;
                     }
                     
                     // Also delete the backup .dat_old file if it exists
-                    if (playerDataFileOld.exists()) {
-                        if (playerDataFileOld.delete()) {
-                            getLogger().info("Deleted backup player data file: " + playerDataFileOld.getAbsolutePath());
-                            deleted = true;
-                        } else {
-                            getLogger().warning("Failed to delete backup player data file: " + playerDataFileOld.getAbsolutePath());
-                        }
-                    }
-                } else {
-                    getLogger().info("Playerdata folder not found: " + playerDataFolder.getAbsolutePath());
-                }
-            }
-            
-            // Also check common world directories (for Ubuntu server setup)
-            File[] worldDirs = {
-                new File("world"),
-                new File("world_nether"),
-                new File("world_the_end"),
-                new File("worlds/world"),
-                new File("worlds/world_nether"),
-                new File("worlds/world_the_end")
-            };
-            
-            for (File worldDir : worldDirs) {
-                if (worldDir.exists() && worldDir.isDirectory()) {
-                    File playerDataFolder = new File(worldDir, "playerdata");
-                    if (playerDataFolder.exists() && playerDataFolder.isDirectory()) {
-                        File playerDataFile = new File(playerDataFolder, playerId.toString() + ".dat");
-                        File playerDataFileOld = new File(playerDataFolder, playerId.toString() + ".dat_old");
-                        
-                        if (playerDataFile.exists() && playerDataFile.delete()) {
-                            getLogger().info("Deleted player data file from " + worldDir.getName() + ": " + playerDataFile.getAbsolutePath());
-                            deleted = true;
-                        }
-                        
-                        if (playerDataFileOld.exists() && playerDataFileOld.delete()) {
-                            getLogger().info("Deleted backup player data file from " + worldDir.getName() + ": " + playerDataFileOld.getAbsolutePath());
-                            deleted = true;
-                        }
-                    }
-                }
-            }
-            
-            // For Ubuntu server, also check absolute paths
-            File[] absolutePaths = {
-                new File("/root/mcserver/world/playerdata"),
-                new File("/home/minecraft/server/world/playerdata"),
-                new File("/opt/minecraft/world/playerdata")
-            };
-            
-            for (File playerDataFolder : absolutePaths) {
-                if (playerDataFolder.exists() && playerDataFolder.isDirectory()) {
-                    File playerDataFile = new File(playerDataFolder, playerId.toString() + ".dat");
-                    File playerDataFileOld = new File(playerDataFolder, playerId.toString() + ".dat_old");
-                    
-                    if (playerDataFile.exists() && playerDataFile.delete()) {
-                        getLogger().info("Deleted player data file from absolute path: " + playerDataFile.getAbsolutePath());
-                        deleted = true;
-                    }
-                    
                     if (playerDataFileOld.exists() && playerDataFileOld.delete()) {
-                        getLogger().info("Deleted backup player data file from absolute path: " + playerDataFileOld.getAbsolutePath());
+                        getLogger().info("Deleted backup player data file: " + playerDataFileOld.getAbsolutePath());
                         deleted = true;
                     }
                 }
             }
             
-            return deleted || true; // Return true if no files were found (considered successful)
+            return deleted;
             
         } catch (SecurityException e) {
             getLogger().log(Level.SEVERE, "Security exception when trying to delete player data for " + playerId, e);
             return false;
         } catch (Exception e) {
             getLogger().log(Level.WARNING, "Error deleting player data for " + playerId, e);
-            return false;
-        }
-    }
-    
-    private boolean saveVerificationCode(String code, String playerName) {
-        try {
-            // First try to use the shared path if configured
-            if (sharedCodesPath != null) {
-                // Check if file exists, if not create it
-                if (!Files.exists(sharedCodesPath)) {
-                    getLogger().info("Shared codes file not found at " + sharedCodesPath + ", creating new file...");
-                    try {
-                        Files.createFile(sharedCodesPath);
-                        Files.write(sharedCodesPath, "{}".getBytes("UTF-8"));
-                    } catch (IOException e) {
-                        getLogger().warning("Could not create shared codes file at " + sharedCodesPath);
-                        getLogger().warning("Falling back to local file...");
-                        return saveToLocalJsonFile(code, playerName);
-                    }
-                }
-                return saveToSharedJsonFile(code, playerName);
-            }
-            
-            // Otherwise save to local JSON file
-            return saveToLocalJsonFile(code, playerName);
-            
-        } catch (Exception e) {
-            getLogger().log(Level.SEVERE, "Error saving verification code", e);
-            return false;
-        }
-    }
-    
-    private boolean saveToSharedJsonFile(String code, String playerName) {
-        try {
-            // Read existing JSON content
-            String jsonContent = "";
-            if (Files.exists(sharedCodesPath)) {
-                byte[] bytes = Files.readAllBytes(sharedCodesPath);
-                jsonContent = new String(bytes, "UTF-8");
-            }
-            
-            // Parse JSON
-            long timestamp = System.currentTimeMillis() / 1000L;
-            
-            String newEntry = String.format(
-                "\"%s\": {\"minecraft_username\": \"%s\", \"timestamp\": %d, \"verified\": true}",
-                code, playerName, timestamp
-            );
-            
-            // Remove trailing } if exists
-            jsonContent = jsonContent.trim();
-            if (jsonContent.startsWith("{") && jsonContent.endsWith("}")) {
-                jsonContent = jsonContent.substring(1, jsonContent.length() - 1);
-            }
-            
-            // Add comma if not empty
-            if (!jsonContent.isEmpty() && !jsonContent.endsWith(",")) {
-                jsonContent += ",";
-            }
-            
-            // Construct new JSON
-            String newJson = "{" + jsonContent + newEntry + "}";
-            
-            // Write back to file
-            Files.write(sharedCodesPath, newJson.getBytes("UTF-8"));
-            
-            getLogger().info("Saved verification code " + code + " for " + playerName + " to shared file at " + sharedCodesPath + " with verified: true");
-            return true;
-            
-        } catch (Exception e) {
-            getLogger().log(Level.SEVERE, "Error saving to shared JSON file at " + sharedCodesPath, e);
-            return false;
-        }
-    }
-    
-    private boolean saveToLocalJsonFile(String code, String playerName) {
-        try {
-            // Create codes file if it doesn't exist
-            if (!codesFile.exists()) {
-                codesFile.createNewFile();
-                FileWriter writer = new FileWriter(codesFile);
-                try {
-                    writer.write("{}");
-                } finally {
-                    writer.close();
-                }
-            }
-            
-            // Read existing JSON
-            String jsonContent;
-            FileReader reader = new FileReader(codesFile);
-            try {
-                StringBuilder content = new StringBuilder();
-                int character;
-                while ((character = reader.read()) != -1) {
-                    content.append((char) character);
-                }
-                jsonContent = content.toString();
-            } finally {
-                reader.close();
-            }
-            
-            // Simple JSON manipulation
-            long timestamp = System.currentTimeMillis() / 1000L;
-            
-            String newEntry = String.format(
-                "\"%s\": {\"minecraft_username\": \"%s\", \"timestamp\": %d, \"verified\": true}",
-                code, playerName, timestamp
-            );
-            
-            // Remove trailing } if exists
-            jsonContent = jsonContent.trim();
-            if (jsonContent.startsWith("{") && jsonContent.endsWith("}")) {
-                jsonContent = jsonContent.substring(1, jsonContent.length() - 1);
-            }
-            
-            // Add comma if not empty
-            if (!jsonContent.isEmpty() && !jsonContent.endsWith(",")) {
-                jsonContent += ",";
-            }
-            
-            // Construct new JSON
-            String newJson = "{" + jsonContent + newEntry + "}";
-            
-            // Write back to file
-            FileWriter writer = new FileWriter(codesFile);
-            try {
-                writer.write(newJson);
-            } finally {
-                writer.close();
-            }
-            
-            getLogger().info("Saved verification code " + code + " for " + playerName + " to local file with verified: true");
-            return true;
-            
-        } catch (Exception e) {
-            getLogger().log(Level.SEVERE, "Error saving verification code", e);
             return false;
         }
     }
@@ -578,7 +470,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
                 timestamp, status, playerName, code);
             
             // Write to log file
-            FileWriter writer = new FileWriter(logFile, true);
+            java.io.FileWriter writer = new java.io.FileWriter(logFile, true);
             try {
                 writer.write(logEntry);
             } finally {
