@@ -15,7 +15,7 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 HYPIXEL_API_KEY = os.getenv("HYPIXEL_API_KEY")
-GUILD_ID = os.getenv("GUILD_ID")
+GUILD_ID = os.getenv("GUILD_ID")  # This is a MongoDB ObjectId (hex string), NOT an integer
 VERIFIED_ROLE_ID = int(os.getenv("VERIFIED_ROLE_ID", "0"))
 VERIFICATION_FILE_PATH = os.getenv("VERIFICATION_FILE_PATH", "/root/verification_codes.json")
 
@@ -99,7 +99,7 @@ async def check_guild_membership(uuid: str) -> dict:
                     if guild is None:
                         return {"success": False, "error": "Player is not in any guild"}
                     
-                    # Check if it's the correct guild
+                    # Check if it's the correct guild - GUILD_ID is a hex string (MongoDB ObjectId)
                     if guild.get("_id") == GUILD_ID:
                         return {"success": True, "guild_name": guild.get("name")}
                     else:
@@ -156,26 +156,31 @@ async def process_verified_codes():
                     
                     # Try to send DM to user
                     try:
-                        guild = bot.get_guild(int(GUILD_ID)) if GUILD_ID else None
-                        if guild:
-                            member = guild.get_member(int(discord_user_id))
-                            if member:
-                                embed = discord.Embed(
-                                    title="❌ Verification Failed",
-                                    description=f"Your Minecraft account **{correct_name}** could not be verified.",
-                                    color=discord.Color.red()
-                                )
-                                embed.add_field(
-                                    name="Reason",
-                                    value=guild_result['error'],
-                                    inline=False
-                                )
-                                embed.add_field(
-                                    name="What to do",
-                                    value="1. Make sure you're in the correct Hypixel guild\n2. Try the verification process again",
-                                    inline=False
-                                )
-                                await member.send(embed=embed)
+                        # Get Discord member from any guild the bot is in
+                        member = None
+                        for guild in bot.guilds:
+                            potential_member = guild.get_member(int(discord_user_id))
+                            if potential_member:
+                                member = potential_member
+                                break
+                        
+                        if member:
+                            embed = discord.Embed(
+                                title="❌ Verification Failed",
+                                description=f"Your Minecraft account **{correct_name}** could not be verified.",
+                                color=discord.Color.red()
+                            )
+                            embed.add_field(
+                                name="Reason",
+                                value=guild_result['error'],
+                                inline=False
+                            )
+                            embed.add_field(
+                                name="What to do",
+                                value="1. Make sure you're in the correct Hypixel guild\n2. Try the verification process again",
+                                inline=False
+                            )
+                            await member.send(embed=embed)
                     except:
                         pass
                     
@@ -183,45 +188,53 @@ async def process_verified_codes():
                     # Player is in the guild - assign verified role
                     data[code]["guild_verified"] = True
                     data[code]["verified_at"] = datetime.now(timezone.utc).isoformat()
+                    data[code]["guild_name"] = guild_result.get("guild_name")
                     
-                    guild = bot.get_guild(int(GUILD_ID)) if GUILD_ID else None
-                    if guild:
-                        member = guild.get_member(int(discord_user_id))
-                        if member:
-                            role = guild.get_role(VERIFIED_ROLE_ID)
-                            if role:
+                    # Try to find member in any guild and assign role
+                    member = None
+                    target_guild = None
+                    for guild in bot.guilds:
+                        potential_member = guild.get_member(int(discord_user_id))
+                        if potential_member:
+                            member = potential_member
+                            target_guild = guild
+                            break
+                    
+                    if member and target_guild:
+                        role = target_guild.get_role(VERIFIED_ROLE_ID)
+                        if role:
+                            try:
+                                if role not in member.roles:
+                                    await member.add_roles(role)
+                                
+                                print(f"✅ Successfully verified {correct_name} (Discord: {member.name}) in guild {guild_result['guild_name']}")
+                                
+                                # Send success DM
                                 try:
-                                    if role not in member.roles:
-                                        await member.add_roles(role)
-                                    
-                                    print(f"✅ Successfully verified {correct_name} (Discord: {member.name}) in guild {guild_result['guild_name']}")
-                                    
-                                    # Send success DM
-                                    try:
-                                        embed = discord.Embed(
-                                            title="✅ Verification Complete!",
-                                            description=f"Your Minecraft account **{correct_name}** has been verified!",
-                                            color=discord.Color.green()
-                                        )
-                                        embed.add_field(
-                                            name="Guild Membership",
-                                            value=f"You are a member of **{guild_result['guild_name']}**",
-                                            inline=False
-                                        )
-                                        embed.add_field(
-                                            name="Role Granted",
-                                            value=f"You have been granted the {role.mention} role",
-                                            inline=False
-                                        )
-                                        embed.set_footer(text=f"Verification code: {code}")
-                                        await member.send(embed=embed)
-                                    except:
-                                        pass
-                                    
-                                except discord.Forbidden:
-                                    error_msg = "Bot missing permissions to add role"
-                                    print(f"❌ {error_msg}")
-                                    data[code]["error"] = error_msg
+                                    embed = discord.Embed(
+                                        title="✅ Verification Complete!",
+                                        description=f"Your Minecraft account **{correct_name}** has been verified!",
+                                        color=discord.Color.green()
+                                    )
+                                    embed.add_field(
+                                        name="Guild Membership",
+                                        value=f"You are a member of **{guild_result['guild_name']}**",
+                                        inline=False
+                                    )
+                                    embed.add_field(
+                                        name="Role Granted",
+                                        value=f"You have been granted the {role.mention} role",
+                                        inline=False
+                                    )
+                                    embed.set_footer(text=f"Verification code: {code}")
+                                    await member.send(embed=embed)
+                                except:
+                                    pass
+                                
+                            except discord.Forbidden:
+                                error_msg = "Bot missing permissions to add role"
+                                print(f"❌ {error_msg}")
+                                data[code]["error"] = error_msg
                 
                 save_verification_codes(data)
                 processed_any = True
@@ -237,8 +250,21 @@ async def process_verified_codes():
 async def on_ready():
     print(f"✅ Discord Bot logged in as {bot.user}")
     print(f"📊 Connected to {len(bot.guilds)} guild(s)")
+    
+    # List all guilds and roles for debugging
+    for guild in bot.guilds:
+        print(f"  - {guild.name} (ID: {guild.id})")
+        if VERIFIED_ROLE_ID:
+            role = guild.get_role(VERIFIED_ROLE_ID)
+            if role:
+                print(f"    ✅ Verified role found: {role.name}")
+            else:
+                print(f"    ❌ Verified role NOT found (ID: {VERIFIED_ROLE_ID})")
+    
     print(f"🤖 Bot is ready for verification!")
     print(f"📁 Verification file: {VERIFICATION_FILE_PATH}")
+    print(f"🎮 Hypixel Guild ID: {GUILD_ID}")
+    print(f"🛡️ Verified Role ID: {VERIFIED_ROLE_ID}")
     
     # Load existing verification codes
     data = load_verification_codes()
@@ -595,6 +621,8 @@ if __name__ == "__main__":
     print("🚀 Starting Discord Verification Bot...")
     print("=" * 50)
     print(f"📁 Verification file: {VERIFICATION_FILE_PATH}")
+    print(f"🎮 Hypixel Guild ID: {GUILD_ID}")
+    print(f"🛡️ Verified Role ID: {VERIFIED_ROLE_ID}")
     
     # Check if verification file exists
     if os.path.exists(VERIFICATION_FILE_PATH):
