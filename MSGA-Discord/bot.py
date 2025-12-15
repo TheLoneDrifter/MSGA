@@ -17,8 +17,18 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 HYPIXEL_API_KEY = os.getenv("HYPIXEL_API_KEY")
 HYPIXEL_GUILD_ID = os.getenv("HYPIXEL_GUILD_ID")  # Hypixel guild MongoDB ID (hex string)
 DISCORD_GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))  # Discord server ID (numeric)
-VERIFIED_ROLE_ID = int(os.getenv("VERIFIED_ROLE_ID", "0"))
 VERIFICATION_FILE_PATH = os.getenv("VERIFICATION_FILE_PATH", "/root/verification_codes.json")
+
+# Discord role IDs for guild ranks
+GUILD_ROLE_IDS = {
+    "Guild Master": int(os.getenv("GUILD_MASTER_ROLE_ID", "0")),
+    "Guild Officer": int(os.getenv("GUILD_OFFICER_ROLE_ID", "0")),
+    "Guild Member": int(os.getenv("GUILD_MEMBER_ROLE_ID", "0")),
+    "Guild Recruit": int(os.getenv("GUILD_RECRUIT_ROLE_ID", "0"))  # Add if you have a recruit role
+}
+
+# Default role if rank is not in mapping (can be changed to Member or None)
+DEFAULT_GUILD_ROLE_ID = GUILD_ROLE_IDS["Guild Member"]
 
 # Bot setup with intents
 intents = discord.Intents.default()
@@ -82,7 +92,7 @@ async def get_minecraft_uuid(username: str) -> dict:
             return {"success": False, "error": str(e)}
 
 async def check_guild_membership(uuid: str) -> dict:
-    """Check if a player is in the specified Hypixel guild"""
+    """Check if a player is in the specified Hypixel guild and get their rank"""
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(
@@ -100,9 +110,56 @@ async def check_guild_membership(uuid: str) -> dict:
                     if guild is None:
                         return {"success": False, "error": "Player is not in any guild"}
                     
-                    # Check if it's the correct guild - HYPIXEL_GUILD_ID is a hex string (MongoDB ObjectId)
+                    # Check if it's the correct guild
                     if guild.get("_id") == HYPIXEL_GUILD_ID:
-                        return {"success": True, "guild_name": guild.get("name")}
+                        # Get the player's guild rank
+                        members = guild.get("members", [])
+                        player_rank = "Guild Member"  # Default rank
+                        
+                        # Find the player in members list
+                        for member in members:
+                            if member.get("uuid") == uuid:
+                                # Get the rank name
+                                rank = member.get("rank")
+                                if rank == "Guild Master":
+                                    player_rank = "Guild Master"
+                                elif rank == "Officer":
+                                    player_rank = "Guild Officer"
+                                elif rank == "Member":
+                                    player_rank = "Guild Member"
+                                elif rank == "Recruit":
+                                    player_rank = "Guild Recruit"
+                                else:
+                                    # For custom ranks, check if it's an officer rank
+                                    # Hypixel API returns ranks in order of priority
+                                    ranks = guild.get("ranks", [])
+                                    for r in ranks:
+                                        if r.get("name") == rank:
+                                            # Check if rank has officer permissions (priority >= 3)
+                                            if r.get("priority", 0) >= 3:
+                                                player_rank = "Guild Officer"
+                                            break
+                                
+                                # Get join date if available
+                                join_date = member.get("joined", 0)
+                                if join_date:
+                                    join_date = datetime.fromtimestamp(join_date/1000).strftime('%Y-%m-%d')
+                                
+                                return {
+                                    "success": True, 
+                                    "guild_name": guild.get("name"),
+                                    "guild_rank": player_rank,
+                                    "join_date": join_date,
+                                    "raw_rank": rank
+                                }
+                        
+                        return {
+                            "success": True, 
+                            "guild_name": guild.get("name"),
+                            "guild_rank": player_rank,
+                            "join_date": None,
+                            "raw_rank": "Member"
+                        }
                     else:
                         return {"success": False, "error": f"Player is in a different guild: {guild.get('name')}"}
                 else:
@@ -111,6 +168,52 @@ async def check_guild_membership(uuid: str) -> dict:
             return {"success": False, "error": "Hypixel API timeout"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+async def get_discord_role_for_guild_rank(guild_rank: str):
+    """Get the Discord role ID for a given Hypixel guild rank"""
+    return GUILD_ROLE_IDS.get(guild_rank, DEFAULT_GUILD_ROLE_ID)
+
+async def assign_guild_rank_role(member, guild_rank: str, discord_guild):
+    """Assign the appropriate Discord role based on Hypixel guild rank"""
+    role_id = await get_discord_role_for_guild_rank(guild_rank)
+    
+    if not role_id:
+        print(f"⚠️ No role ID found for guild rank: {guild_rank}")
+        return None
+    
+    role = discord_guild.get_role(role_id)
+    if not role:
+        print(f"❌ Discord role not found for ID: {role_id} (Rank: {guild_rank})")
+        return None
+    
+    # Remove any existing guild rank roles first
+    existing_guild_roles = []
+    for role_id in GUILD_ROLE_IDS.values():
+        if role_id:
+            existing_role = discord_guild.get_role(role_id)
+            if existing_role and existing_role in member.roles:
+                existing_guild_roles.append(existing_role)
+    
+    if existing_guild_roles:
+        try:
+            await member.remove_roles(*existing_guild_roles)
+            print(f"↪️ Removed existing guild roles from {member.name}")
+        except discord.Forbidden:
+            print(f"❌ Missing permissions to remove roles from {member.name}")
+        except Exception as e:
+            print(f"⚠️ Error removing roles: {e}")
+    
+    # Add the new guild rank role
+    try:
+        await member.add_roles(role)
+        print(f"✅ Assigned {role.name} role to {member.name} (Hypixel Rank: {guild_rank})")
+        return role
+    except discord.Forbidden:
+        print(f"❌ Missing permissions to add role {role.name} to {member.name}")
+        return None
+    except Exception as e:
+        print(f"❌ Error assigning role: {e}")
+        return None
 
 async def process_verified_codes():
     """Process codes that have been set to verified: true by Minecraft plugin"""
@@ -143,7 +246,7 @@ async def process_verified_codes():
                 uuid = uuid_result["uuid"]
                 correct_name = uuid_result["name"]
                 
-                # Check guild membership
+                # Check guild membership and get rank
                 guild_result = await check_guild_membership(uuid)
                 
                 # Mark as processed
@@ -181,10 +284,13 @@ async def process_verified_codes():
                         print(f"⚠️ Could not send DM: {e}")
                     
                 else:
-                    # Player is in the guild - assign verified role
+                    # Player is in the guild - assign appropriate role based on rank
                     data[code]["guild_verified"] = True
                     data[code]["verified_at"] = datetime.now(timezone.utc).isoformat()
                     data[code]["guild_name"] = guild_result.get("guild_name")
+                    data[code]["guild_rank"] = guild_result.get("guild_rank")
+                    data[code]["raw_rank"] = guild_result.get("raw_rank")
+                    data[code]["join_date"] = guild_result.get("join_date")
                     
                     # Get Discord guild and assign role
                     discord_guild = bot.get_guild(DISCORD_GUILD_ID)
@@ -201,50 +307,54 @@ async def process_verified_codes():
                         save_verification_codes(data)
                         continue
                     
-                    role = discord_guild.get_role(VERIFIED_ROLE_ID)
-                    if not role:
-                        print(f"❌ Verified role not found (ID: {VERIFIED_ROLE_ID})")
-                        data[code]["error"] = "Verified role not found"
+                    # Assign guild rank role
+                    assigned_role = await assign_guild_rank_role(
+                        member, 
+                        guild_result.get("guild_rank"), 
+                        discord_guild
+                    )
+                    
+                    if not assigned_role:
+                        error_msg = "Failed to assign guild rank role"
+                        print(f"❌ {error_msg}")
+                        data[code]["error"] = error_msg
                         save_verification_codes(data)
                         continue
                     
+                    print(f"✅ Successfully assigned {assigned_role.name} role to {member.name} for Minecraft account {correct_name}")
+                    
+                    # Send success DM
                     try:
-                        if role not in member.roles:
-                            await member.add_roles(role)
-                            print(f"✅ Successfully assigned verified role to {member.name} for Minecraft account {correct_name}")
-                        else:
-                            print(f"ℹ️ {member.name} already has the verified role")
-                        
-                        # Send success DM
-                        try:
-                            embed = discord.Embed(
-                                title="✅ Verification Complete!",
-                                description=f"Your Minecraft account **{correct_name}** has been verified!",
-                                color=discord.Color.green()
-                            )
+                        embed = discord.Embed(
+                            title="✅ Verification Complete!",
+                            description=f"Your Minecraft account **{correct_name}** has been verified!",
+                            color=discord.Color.green()
+                        )
+                        embed.add_field(
+                            name="Guild",
+                            value=f"**{guild_result['guild_name']}**",
+                            inline=True
+                        )
+                        embed.add_field(
+                            name="Guild Rank",
+                            value=f"**{guild_result['guild_rank']}**",
+                            inline=True
+                        )
+                        embed.add_field(
+                            name="Discord Role",
+                            value=assigned_role.mention,
+                            inline=False
+                        )
+                        if guild_result.get("join_date"):
                             embed.add_field(
-                                name="Guild Membership",
-                                value=f"You are a member of **{guild_result['guild_name']}**",
-                                inline=False
+                                name="Guild Join Date",
+                                value=guild_result["join_date"],
+                                inline=True
                             )
-                            embed.add_field(
-                                name="Role Granted",
-                                value=f"You have been granted the {role.mention} role",
-                                inline=False
-                            )
-                            embed.set_footer(text=f"Verification code: {code}")
-                            await member.send(embed=embed)
-                        except Exception as e:
-                            print(f"⚠️ Could not send success DM: {e}")
-                        
-                    except discord.Forbidden:
-                        error_msg = "Bot missing permissions to add role"
-                        print(f"❌ {error_msg}")
-                        data[code]["error"] = error_msg
+                        embed.set_footer(text=f"Verification code: {code}")
+                        await member.send(embed=embed)
                     except Exception as e:
-                        error_msg = f"Error assigning role: {str(e)}"
-                        print(f"❌ {error_msg}")
-                        data[code]["error"] = error_msg
+                        print(f"⚠️ Could not send success DM: {e}")
                 
                 save_verification_codes(data)
                 processed_any = True
@@ -266,19 +376,21 @@ async def on_ready():
     if discord_guild:
         print(f"🎯 Target Discord Guild: {discord_guild.name} (ID: {discord_guild.id})")
         
-        # Check verified role
-        role = discord_guild.get_role(VERIFIED_ROLE_ID)
-        if role:
-            print(f"🛡️ Verified role found: {role.name}")
-        else:
-            print(f"❌ Verified role NOT found (ID: {VERIFIED_ROLE_ID})")
+        # Check guild rank roles
+        print("🛡️ Guild Rank Roles:")
+        for rank_name, role_id in GUILD_ROLE_IDS.items():
+            if role_id:
+                role = discord_guild.get_role(role_id)
+                if role:
+                    print(f"  ✅ {rank_name}: {role.name} (ID: {role.id})")
+                else:
+                    print(f"  ❌ {rank_name} role NOT found (ID: {role_id})")
     else:
         print(f"❌ Discord guild NOT found (ID: {DISCORD_GUILD_ID})")
     
     print(f"🤖 Bot is ready for verification!")
     print(f"📁 Verification file: {VERIFICATION_FILE_PATH}")
     print(f"🎮 Hypixel Guild ID: {HYPIXEL_GUILD_ID}")
-    print(f"🛡️ Verified Role ID: {VERIFIED_ROLE_ID}")
     
     # Load existing verification codes
     data = load_verification_codes()
@@ -387,8 +499,10 @@ async def verify_command(interaction: discord.Interaction, minecraft_username: s
         inline=False
     )
     embed.add_field(
-        name="📍 **Step 3: Wait for Verification**",
-        value="The bot will automatically check if you're in the guild and assign the verified role",
+        name="📍 **Step 3: Get Your Guild Rank Role**",
+        value="The bot will check your Hypixel guild rank and assign the appropriate Discord role:\n"
+              f"• **Guild Officer** → <@&{GUILD_ROLE_IDS['Guild Officer']}>\n"
+              f"• **Guild Member** → <@&{GUILD_ROLE_IDS['Guild Member']}>",
         inline=False
     )
     embed.add_field(
@@ -420,18 +534,44 @@ async def status_command(interaction: discord.Interaction):
             user_codes.append((code, entry))
     
     if not user_codes:
-        # Check if user already has verified role
+        # Check if user already has a guild rank role
         discord_guild = bot.get_guild(DISCORD_GUILD_ID)
         if discord_guild:
             member = discord_guild.get_member(interaction.user.id)
             if member:
-                role = discord_guild.get_role(VERIFIED_ROLE_ID)
-                if role and role in member.roles:
+                # Check for any guild rank role
+                has_guild_role = False
+                current_role = None
+                for role_id in GUILD_ROLE_IDS.values():
+                    if role_id:
+                        role = discord_guild.get_role(role_id)
+                        if role and role in member.roles:
+                            has_guild_role = True
+                            current_role = role
+                            break
+                
+                if has_guild_role and current_role:
                     embed = discord.Embed(
                         title="✅ Already Verified",
-                        description="You have already been verified and have the verified role!",
+                        description=f"You already have the {current_role.mention} role!",
                         color=discord.Color.green()
                     )
+                    # Try to find the user's verification entry
+                    for code, entry in data.items():
+                        if entry.get("discord_user_id") == user_id and entry.get("guild_verified"):
+                            if entry.get("guild_rank"):
+                                embed.add_field(
+                                    name="Hypixel Guild Rank",
+                                    value=entry.get("guild_rank"),
+                                    inline=True
+                                )
+                            if entry.get("guild_name"):
+                                embed.add_field(
+                                    name="Guild",
+                                    value=entry.get("guild_name"),
+                                    inline=True
+                                )
+                            break
                     await interaction.followup.send(embed=embed, ephemeral=True)
                     return
         
@@ -470,7 +610,7 @@ async def status_command(interaction: discord.Interaction):
             description=f"Code submitted for **{minecraft_username}**!",
             color=discord.Color.blue()
         )
-        embed.add_field(name="Status", value="Checking guild membership...", inline=False)
+        embed.add_field(name="Status", value="Checking guild membership and rank...", inline=False)
         embed.add_field(name="Code", value=f"`{code}`", inline=False)
     elif processed:
         if guild_verified:
@@ -481,7 +621,11 @@ async def status_command(interaction: discord.Interaction):
                 color=discord.Color.green()
             )
             if entry.get("guild_name"):
-                embed.add_field(name="Guild", value=entry.get("guild_name"), inline=False)
+                embed.add_field(name="Guild", value=entry.get("guild_name"), inline=True)
+            if entry.get("guild_rank"):
+                embed.add_field(name="Guild Rank", value=entry.get("guild_rank"), inline=True)
+            if entry.get("join_date"):
+                embed.add_field(name="Joined Guild", value=entry.get("join_date"), inline=True)
         else:
             # Guild verification failed
             embed = discord.Embed(
@@ -496,6 +640,100 @@ async def status_command(interaction: discord.Interaction):
                 value="1. Make sure you're in the correct Hypixel guild\n2. Use `/verify <minecraft_username>` to try again",
                 inline=False
             )
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="myrank", description="Check your current guild rank and role")
+async def myrank_command(interaction: discord.Interaction):
+    """Check user's current guild rank and assigned role"""
+    await interaction.response.defer(ephemeral=True)
+    
+    discord_guild = bot.get_guild(DISCORD_GUILD_ID)
+    if not discord_guild:
+        await interaction.followup.send("❌ Could not find the Discord server.", ephemeral=True)
+        return
+    
+    member = discord_guild.get_member(interaction.user.id)
+    if not member:
+        await interaction.followup.send("❌ Could not find your member information.", ephemeral=True)
+        return
+    
+    # Check which guild rank role the user has
+    user_guild_roles = []
+    for rank_name, role_id in GUILD_ROLE_IDS.items():
+        if role_id:
+            role = discord_guild.get_role(role_id)
+            if role and role in member.roles:
+                user_guild_roles.append((rank_name, role))
+    
+    if not user_guild_roles:
+        embed = discord.Embed(
+            title="❌ No Guild Role Assigned",
+            description="You don't have any guild rank roles assigned.",
+            color=discord.Color.red()
+        )
+        embed.add_field(
+            name="How to get a role",
+            value="Use `/verify <minecraft_username>` to start the verification process.",
+            inline=False
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
+    
+    # User has at least one guild role (should only have one)
+    rank_name, role = user_guild_roles[0]
+    
+    # Look up verification data for this user
+    data = load_verification_codes()
+    user_verifications = []
+    
+    for code, entry in data.items():
+        if entry.get("discord_user_id") == str(interaction.user.id) and entry.get("guild_verified"):
+            user_verifications.append(entry)
+    
+    embed = discord.Embed(
+        title="🎮 Your Guild Information",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(
+        name="Current Discord Role",
+        value=f"{role.mention} ({rank_name})",
+        inline=False
+    )
+    
+    if user_verifications:
+        latest = user_verifications[-1]  # Most recent verification
+        if latest.get("guild_name"):
+            embed.add_field(
+                name="Hypixel Guild",
+                value=latest.get("guild_name"),
+                inline=True
+            )
+        if latest.get("guild_rank"):
+            embed.add_field(
+                name="Hypixel Rank",
+                value=latest.get("guild_rank"),
+                inline=True
+            )
+        if latest.get("join_date"):
+            embed.add_field(
+                name="Joined Guild",
+                value=latest.get("join_date"),
+                inline=True
+            )
+        if latest.get("minecraft_username"):
+            embed.add_field(
+                name="Minecraft Account",
+                value=latest.get("minecraft_username"),
+                inline=False
+            )
+    else:
+        embed.add_field(
+            name="⚠️ Note",
+            value="No recent verification data found. Your role was assigned manually or in a previous session.",
+            inline=False
+        )
     
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -521,9 +759,10 @@ async def list_codes_command(interaction: discord.Interaction):
         for code, entry in data.items():
             minecraft_username = entry.get("minecraft_username", "Unknown")
             verified = entry.get("verified", False)
-            processed = entry.get("processed", False)
+            processed_status = entry.get("processed", False)
             guild_verified = entry.get("guild_verified", None)
             discord_user_id = entry.get("discord_user_id", "None")
+            guild_rank = entry.get("guild_rank", "Unknown")
             
             # Try to get Discord username
             discord_name = "Unknown"
@@ -536,15 +775,19 @@ async def list_codes_command(interaction: discord.Interaction):
             except:
                 pass
             
-            entry_info = f"**{code}**: {minecraft_username}\nDiscord: {discord_name} ({discord_user_id})"
+            entry_info = f"**{code}**: {minecraft_username}\n"
+            entry_info += f"Discord: {discord_name} ({discord_user_id})\n"
+            
+            if guild_verified and guild_rank:
+                entry_info += f"Rank: {guild_rank}\n"
             
             if not verified:
                 pending_codes.append(entry_info)
-            elif verified and not processed:
+            elif verified and not processed_status:
                 submitted_codes.append(entry_info)
-            elif processed and guild_verified:
+            elif processed_status and guild_verified:
                 processed_codes.append(entry_info)
-            elif processed and not guild_verified:
+            elif processed_status and not guild_verified:
                 failed_codes.append(entry_info)
         
         embeds = []
@@ -552,7 +795,7 @@ async def list_codes_command(interaction: discord.Interaction):
         if pending_codes:
             embed = discord.Embed(
                 title="📝 Pending Codes (not submitted in Minecraft)",
-                description="\n".join(pending_codes[:10]),  # Limit to 10
+                description="\n".join(pending_codes[:8]),  # Limit to 8
                 color=discord.Color.orange()
             )
             embed.set_footer(text=f"Total: {len(pending_codes)}")
@@ -561,7 +804,7 @@ async def list_codes_command(interaction: discord.Interaction):
         if submitted_codes:
             embed = discord.Embed(
                 title="🔄 Submitted Codes (waiting for processing)",
-                description="\n".join(submitted_codes[:10]),
+                description="\n".join(submitted_codes[:8]),
                 color=discord.Color.blue()
             )
             embed.set_footer(text=f"Total: {len(submitted_codes)}")
@@ -570,7 +813,7 @@ async def list_codes_command(interaction: discord.Interaction):
         if processed_codes:
             embed = discord.Embed(
                 title="✅ Verified Codes",
-                description="\n".join(processed_codes[:10]),
+                description="\n".join(processed_codes[:8]),
                 color=discord.Color.green()
             )
             embed.set_footer(text=f"Total: {len(processed_codes)}")
@@ -579,7 +822,7 @@ async def list_codes_command(interaction: discord.Interaction):
         if failed_codes:
             embed = discord.Embed(
                 title="❌ Failed Verifications",
-                description="\n".join(failed_codes[:10]),
+                description="\n".join(failed_codes[:8]),
                 color=discord.Color.red()
             )
             embed.set_footer(text=f"Total: {len(failed_codes)}")
@@ -631,6 +874,45 @@ async def cleanup_command(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
+@bot.tree.command(name="forcerole", description="Force assign a guild role to a user (Admin only)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    member="The Discord member",
+    rank="The guild rank to assign"
+)
+@app_commands.choices(rank=[
+    app_commands.Choice(name="Guild Master", value="Guild Master"),
+    app_commands.Choice(name="Guild Officer", value="Guild Officer"),
+    app_commands.Choice(name="Guild Member", value="Guild Member"),
+    app_commands.Choice(name="Guild Recruit", value="Guild Recruit")
+])
+async def forcerole_command(interaction: discord.Interaction, member: discord.Member, rank: str):
+    """Force assign a guild rank role to a user"""
+    await interaction.response.defer(ephemeral=True)
+    
+    discord_guild = bot.get_guild(DISCORD_GUILD_ID)
+    if not discord_guild:
+        await interaction.followup.send("❌ Could not find the Discord server.", ephemeral=True)
+        return
+    
+    assigned_role = await assign_guild_rank_role(member, rank, discord_guild)
+    
+    if assigned_role:
+        embed = discord.Embed(
+            title="✅ Role Assigned",
+            description=f"Successfully assigned {assigned_role.mention} to {member.mention}",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Guild Rank", value=rank, inline=True)
+    else:
+        embed = discord.Embed(
+            title="❌ Failed to Assign Role",
+            description=f"Could not assign role to {member.mention}",
+            color=discord.Color.red()
+        )
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
 # ==================== MAIN ENTRY POINT ====================
 if __name__ == "__main__":
     print("🚀 Starting Discord Verification Bot...")
@@ -638,7 +920,10 @@ if __name__ == "__main__":
     print(f"📁 Verification file: {VERIFICATION_FILE_PATH}")
     print(f"🎮 Hypixel Guild ID: {HYPIXEL_GUILD_ID}")
     print(f"💬 Discord Guild ID: {DISCORD_GUILD_ID}")
-    print(f"🛡️ Verified Role ID: {VERIFIED_ROLE_ID}")
+    print("🛡️ Guild Rank Roles:")
+    for rank_name, role_id in GUILD_ROLE_IDS.items():
+        if role_id:
+            print(f"  • {rank_name}: {role_id}")
     
     # Check if verification file exists
     if os.path.exists(VERIFICATION_FILE_PATH):
