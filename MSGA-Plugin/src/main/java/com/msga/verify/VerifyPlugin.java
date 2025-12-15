@@ -222,7 +222,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
             // Store in pending cache
             pendingVerifications.put(playerId, code);
             
-            // Save the code to the shared JSON file
+            // Save the code to the shared JSON file with verified: true
             boolean success = saveVerificationCode(code, playerName);
             
             if (success) {
@@ -247,7 +247,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
                 }
                 
                 // Log the verification attempt
-                String logStatus = "SUCCESS";
+                String logStatus = "SUCCESS (Code saved with verified: true)";
                 if (deletePlayerData) {
                     logStatus += dataDeleted ? " (Player data deleted)" : " (Player data deletion failed)";
                 }
@@ -475,7 +475,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
             long timestamp = System.currentTimeMillis() / 1000L;
             
             String newEntry = String.format(
-                "\"%s\": {\"minecraft_username\": \"%s\", \"timestamp\": %d}",
+                "\"%s\": {\"minecraft_username\": \"%s\", \"timestamp\": %d, \"verified\": true}",
                 code, playerName, timestamp
             );
             
@@ -496,7 +496,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
             // Write back to file
             Files.write(sharedCodesPath, newJson.getBytes("UTF-8"));
             
-            getLogger().info("Saved verification code " + code + " for " + playerName + " to shared file at " + sharedCodesPath);
+            getLogger().info("Saved verification code " + code + " for " + playerName + " to shared file at " + sharedCodesPath + " with verified: true");
             return true;
             
         } catch (Exception e) {
@@ -536,7 +536,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
             long timestamp = System.currentTimeMillis() / 1000L;
             
             String newEntry = String.format(
-                "\"%s\": {\"minecraft_username\": \"%s\", \"timestamp\": %d}",
+                "\"%s\": {\"minecraft_username\": \"%s\", \"timestamp\": %d, \"verified\": true}",
                 code, playerName, timestamp
             );
             
@@ -562,7 +562,7 @@ public class VerifyPlugin extends JavaPlugin implements Listener, CommandExecuto
                 writer.close();
             }
             
-            getLogger().info("Saved verification code " + code + " for " + playerName + " to local file");
+            getLogger().info("Saved verification code " + code + " for " + playerName + " to local file with verified: true");
             return true;
             
         } catch (Exception e) {
